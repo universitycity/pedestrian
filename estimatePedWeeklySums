@@ -1,0 +1,287 @@
+######################################################################################
+#
+# Estimating weekly pedestrian sums for each ped counter
+#
+# Tyler Tran
+# May 2019
+#
+# Inputs: typologies.csv (csv classifying sensors into categories based on land use),
+# csv file for each sensor
+# Outputs: modeledWeekly.csv (csv of estimated weekly sums for each sensor)
+#
+######################################################################################
+
+
+# rm(list = ls())
+
+library(dplyr); library(ggplot2)
+
+# setwd('')
+
+# all the csvs of ped count data
+# these can be downloaded from the "Pedestrian Data" section of universitycity.org/pedestrian
+files <- list.files(path = 'F:/Tyler/pedestrian/counterData/fifteenMinute', pattern = '\\.csv$')
+
+# Assigned each sensor to a different "land use" type based on its signal
+# cbd signals are areas with a lot of M-F jobs...much lower on weekends, similar proportions on weekdays
+# low variation signals are more prominent in residential areas in the western part of the district. Pretty small variation in terms of day of week
+typeSignals <- read.csv('./typologies.csv')
+typeSignals$sensor <- paste0(typeSignals$sensor, '.csv')
+lowVarSensors <- typeSignals$sensor[typeSignals$class == 'low variation']
+cbdSensors <- typeSignals$sensor[typeSignals$class == 'cbd']
+parkSensors <- typeSignals$sensor[typeSignals$class == 'park']
+incSensors <- typeSignals$sensor[typeSignals$class == 'inc']
+
+
+# compiledData <- data.frame(lat = NULL, long = NULL, startDate = NULL, endDate = NULL, fullDay = NULL, 
+#                            pedAvg = NULL, pedMed = NULL, pedWeekSum_est = NULL)
+
+# For the sensors with at least 7 full days of data, see what % of week's counts comes from each dow
+dowBreakdown <- data.frame(sensor = NULL, pMon = NULL, pTue = NULL,
+                           pWed = NULL, pThu = NULL, pFri = NULL,
+                           pSat = NULL, pSun = NULL)
+
+weeklySum <- data.frame(sensor = NULL, lat = NULL, long = NULL, weeklySum = NULL)
+
+for (i in 1:length(files)){
+  peds <- read.csv(paste0('F:/Tyler/pedestrian/counterData/fifteenMinute/', files[i]))
+  peds$method <- 'sensor'
+  peds$date <- as.character(peds$date)
+  pedsDate <- unlist(strsplit(peds$date, ' '))
+  pedsTime <- pedsDate[grepl('\\:', pedsDate)]
+  pedsDate <- pedsDate[grepl('/', pedsDate)]
+  peds <- data.frame(date = pedsDate, time = pedsTime,
+                     total = peds$total, lat = peds$lat,
+                     long = peds$long,
+                     method = peds$method)
+  peds$date <- as.Date(peds$date, format = '%m/%d/%Y')
+  peds$dow <- weekdays(peds$date)
+  
+  peds <- peds[! (peds$date >= as.Date('2017-11-21') & peds$date <= as.Date('2017-11-26')),] # Remove Thanksgiving 2017
+  peds <- peds[! (peds$date >= as.Date('2018-11-20') & peds$date <= as.Date('2018-11-25')),] # Remove Thanksgiving 2018
+  peds <- peds[! (peds$date >= as.Date('2017-12-21') & peds$date <= as.Date('2018-01-01')),] # Remove Christmas 2017
+  peds <- peds[! (peds$date >= as.Date('2018-12-21') & peds$date <= as.Date('2019-01-01')),] # Remove Christmas 2018
+  peds <- peds[! (peds$date >= as.Date('2017-07-03') & peds$date <= as.Date('2017-07-05')),] # Remove July 4th 2017
+  peds <- peds[! (peds$date >= as.Date('2018-07-03') & peds$date <= as.Date('2018-07-05')),] # Remove July 4th 2018
+  peds <- peds[! (peds$date == as.Date('2017-05-29')),] # Remove Memorial Day 2017
+  
+  if (files[i] == 'onBaltimore_46th_FarragutTer_3Jun19_18Jun19_15min.csv'){
+    peds <- peds[! (peds$date == as.Date('2019-06-06')),] # Remove Dollar Stroll
+    peds <- peds[! (peds$date == as.Date('2019-06-08')),] # Remove Porch Fest
+  }
+  
+  # Add note saying whether a 15-minute measurement is part of a day for which we have all data (24 hours * 4 = 96 measurements)
+  peds$fullDay <- NA
+  peds$date <- as.character(peds$date) 
+  peds$dateOnly <- unlist(strsplit(peds$date, ' '))[grepl('-', unlist(strsplit(peds$date, ' ')))]
+  peds$dateOnly <- as.Date(peds$dateOnly, format = '%Y-%m-%d')
+  for (j in 1:length(unique(peds$dateOnly))){
+    dataFromADay <- peds[peds$dateOnly == unique(peds$dateOnly)[j],]
+    if (nrow(dataFromADay) == 96){
+      peds$fullDay[peds$dateOnly == unique(peds$dateOnly)[j]] <- 'Full'
+    } else{
+      peds$fullDay[peds$dateOnly == unique(peds$dateOnly)[j]] <- 'Partial'
+    }
+  }
+  
+  
+  # If a certain sensor has at least 7 full days worth of data, then discard data from partial days
+  # Then calculate median counts for each day of the week and a weekly sum of those medians
+  if (length(unique(peds$dateOnly[peds$fullDay == 'Full'])) >= 7){
+    peds <- peds[peds$fullDay == 'Full',]
+    
+    # First aggregate to daily sums
+    pedsByDay <- peds %>%
+      group_by(dateOnly) %>%
+      dplyr::summarise(dailyTotal = sum(total, na.rm = T))
+    pedsByDay$dow <- weekdays(pedsByDay$dateOnly)
+    
+    # Median counts for each day of data collection split up by day of week (if there are only 7 full days of data collection, the median will be the same as the actual sum bc n=1)
+    monMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Monday'], na.rm = T)
+    tueMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Tuesday'], na.rm = T)
+    wedMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Wednesday'], na.rm = T)
+    thuMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Thursday'], na.rm = T)
+    friMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Friday'], na.rm = T)
+    satMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Saturday'], na.rm = T)
+    sunMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Sunday'], na.rm = T)
+    
+    thisWeeklySum <- sum(c(monMedian, tueMedian, wedMedian,
+                           thuMedian, friMedian, satMedian,
+                           sunMedian), na.rm = T)
+    
+    weeklySum <- rbind(weeklySum, data.frame(sensor = files[i],
+                                             lat = unique(peds$lat),
+                                             long = unique(peds$long),
+                                             weeklySum = thisWeeklySum))
+    
+  } else{
+    peds <- peds[peds$fullDay == 'Full',]
+    
+    # First aggregate to daily sums
+    pedsByDay <- peds %>%
+      group_by(dateOnly) %>%
+      dplyr::summarise(dailyTotal = sum(total, na.rm = T))
+    pedsByDay$dow <- weekdays(pedsByDay$dateOnly)
+    
+    # Median counts for each day of data collection split up by day of week (if there are only 7 full days of data collection, the median will be the same as the actual sum bc n=1)
+    monMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Monday'], na.rm = T)
+    tueMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Tuesday'], na.rm = T)
+    wedMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Wednesday'], na.rm = T)
+    thuMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Thursday'], na.rm = T)
+    friMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Friday'], na.rm = T)
+    satMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Saturday'], na.rm = T)
+    sunMedian <- median(pedsByDay$dailyTotal[pedsByDay$dow == 'Sunday'], na.rm = T)
+    
+    thisWeeklySum <- NA
+  }
+  
+  dowBreakdown <- rbind(dowBreakdown, data.frame(sensor = files[i], 
+                                                 pMon = monMedian/thisWeeklySum,
+                                                 pTue = tueMedian/thisWeeklySum,
+                                                 pWed = wedMedian/thisWeeklySum,
+                                                 pThu = thuMedian/thisWeeklySum,
+                                                 pFri = friMedian/thisWeeklySum,
+                                                 pSat = satMedian/thisWeeklySum,
+                                                 pSun = sunMedian/thisWeeklySum))
+}
+
+# proportion of peds on weekends
+dowBreakdown$pWeekend <- dowBreakdown$pSat + dowBreakdown$pSun
+
+# split into different "signal types"
+lowVar_dowBreakdown <- dowBreakdown[dowBreakdown$sensor %in% lowVarSensors,]
+cbd_dowBreakdown <- dowBreakdown[dowBreakdown$sensor %in% cbdSensors,]
+park_dowBreakdown <- dowBreakdown[dowBreakdown$sensor %in% parkSensors,]
+
+# clean up data frames
+lowVarSignal <- data.frame(Monday = median(lowVar_dowBreakdown$pMon),
+                           Tuesday = median(lowVar_dowBreakdown$pTue),
+                           Wednesday = median(lowVar_dowBreakdown$pWed),
+                           Thursday = median(lowVar_dowBreakdown$pThu),
+                           Friday = median(lowVar_dowBreakdown$pFri),
+                           Saturday = median(lowVar_dowBreakdown$pSat),
+                           Sunday = median(lowVar_dowBreakdown$pSun))
+cbdSignal <- data.frame(Monday = median(cbd_dowBreakdown$pMon),
+                        Tuesday = median(cbd_dowBreakdown$pTue),
+                        Wednesday = median(cbd_dowBreakdown$pWed),
+                        Thursday = median(cbd_dowBreakdown$pThu),
+                        Friday = median(cbd_dowBreakdown$pFri),
+                        Saturday = median(cbd_dowBreakdown$pSat),
+                        Sunday = median(cbd_dowBreakdown$pSun))
+parkSignal <- data.frame(Monday = median(park_dowBreakdown$pMon),
+                         Tuesday = median(park_dowBreakdown$pTue),
+                         Wednesday = median(park_dowBreakdown$pWed),
+                         Thursday = median(park_dowBreakdown$pThu),
+                         Friday = median(park_dowBreakdown$pFri),
+                         Saturday = median(park_dowBreakdown$pSat),
+                         Sunday = median(park_dowBreakdown$pSun))
+
+dowBreakdown.long <- data.frame(sensor = rep(dowBreakdown$sensor, 7),
+                                prop = c(dowBreakdown$pMon, dowBreakdown$pTue, dowBreakdown$pWed,
+                                         dowBreakdown$pThu, dowBreakdown$pFri, dowBreakdown$pSat,
+                                         dowBreakdown$pSun),
+                                dow = rep(c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'), each = length(dowBreakdown$sensor)))
+dowBreakdown.long$dow <- factor(dowBreakdown.long$dow, levels = c('Monday', 'Tuesday', 'Wednesday',
+                                                                  'Thursday', 'Friday', 'Saturday', 'Sunday'))
+dowBreakdown.long <- left_join(dowBreakdown.long, data.frame(sensor = typeSignals$sensor, class = typeSignals$class))
+
+
+
+# visualize different "signal types"
+classes2plot <- c('cbd', 'low variation')
+spectralSig <- ggplot() +
+  geom_line(data=dowBreakdown.long[dowBreakdown.long$class %in% classes2plot,], aes(x=dow, y=prop, col = class, group=sensor))
+spectralSig
+
+
+################
+# For all the sensors with incomplete data, apply whichever signal is appropriate (cbd, lowVar, etc.)
+################
+
+
+for (i in 1:length(incSensors)){
+  peds <- read.csv(paste0('F:/Tyler/pedestrian/counterData/fifteenMinute/', incSensors[i]))
+  peds$method <- 'sensor'
+  peds$date <- as.character(peds$date)
+  pedsDate <- unlist(strsplit(peds$date, ' '))
+  pedsTime <- pedsDate[grepl('\\:', pedsDate)]
+  pedsDate <- pedsDate[grepl('/', pedsDate)]
+  peds <- data.frame(date = pedsDate, time = pedsTime,
+                     total = peds$total, lat = peds$lat,
+                     long = peds$long,
+                     method = peds$method)
+  peds$date <- as.Date(peds$date, format = '%m/%d/%Y')
+  peds$dow <- weekdays(peds$date)
+  
+  peds <- peds[! (peds$date >= as.Date('2017-11-21') & peds$date <= as.Date('2017-11-26')),] # Remove Thanksgiving 2017
+  peds <- peds[! (peds$date >= as.Date('2018-11-20') & peds$date <= as.Date('2018-11-25')),] # Remove Thanksgiving 2018
+  peds <- peds[! (peds$date >= as.Date('2017-12-21') & peds$date <= as.Date('2018-01-01')),] # Remove Christmas 2017
+  peds <- peds[! (peds$date >= as.Date('2018-12-21') & peds$date <= as.Date('2019-01-01')),] # Remove Christmas 2018
+  peds <- peds[! (peds$date >= as.Date('2017-07-03') & peds$date <= as.Date('2017-07-05')),] # Remove July 4th 2017
+  peds <- peds[! (peds$date >= as.Date('2018-07-03') & peds$date <= as.Date('2018-07-05')),] # Remove July 4th 2018
+  peds <- peds[! (peds$date == as.Date('2017-05-29')),] # Remove Memorial Day 2017
+  
+  if (files[i] == 'onBaltimore_46th_FarragutTer_3Jun19_18Jun19_15min.csv'){
+    peds <- peds[! (peds$date == as.Date('2019-06-06')),] # Remove Dollar Stroll
+    peds <- peds[! (peds$date == as.Date('2019-06-08')),] # Remove Porch Fest
+  }
+  
+  # Add note saying whether a 15-minute measurement is part of a day for which we have all data (24 hours * 4 = 96 measurements)
+  peds$fullDay <- NA
+  peds$date <- as.character(peds$date) 
+  peds$dateOnly <- unlist(strsplit(peds$date, ' '))[grepl('-', unlist(strsplit(peds$date, ' ')))]
+  peds$dateOnly <- as.Date(peds$dateOnly, format = '%Y-%m-%d')
+  for (j in 1:length(unique(peds$dateOnly))){
+    dataFromADay <- peds[peds$dateOnly == unique(peds$dateOnly)[j],]
+    if (nrow(dataFromADay) == 96){
+      peds$fullDay[peds$dateOnly == unique(peds$dateOnly)[j]] <- 'Full'
+    } else{
+      peds$fullDay[peds$dateOnly == unique(peds$dateOnly)[j]] <- 'Partial'
+    }
+  }
+  
+  # Look at each full day by itself individually. Say we have data from Friday and Saturday.
+  # Then look at just Friday data and predict other 6 days of week using proportions (like cbd, low variation, etc.)
+  # Do the same for Saturday: only look at Sat data and predict other 6 days
+  # Then to get weekly sum, use the actual Fri and Sat data and means of predictions for other 5 days
+  
+  peds <- peds[peds$fullDay == 'Full',]
+  
+  
+  actualData <- data.frame(dow = NULL, dailySum = NULL)
+  modeledData_all <- data.frame(dataDay = NULL, modeledDay = NULL, dailySum = NULL)
+  for (j in 1:length(unique(peds$date))){
+    thisDayofData <- peds[peds$date == unique(peds$date)[j],]
+    dailySum <- sum(thisDayofData$total, na.rm = T) # daily sum of actual data
+    actualData <- rbind(actualData, data.frame(dow = unique(thisDayofData$dow), dailySum = dailySum))
+    modeledWeek <- dailySum/lowVarSignal[1, colnames(lowVarSignal) == unique(thisDayofData$dow)] # weekly extrapolated sum based on proportions (like low variation)
+    modeledData <- data.frame(dataDay = rep(unique(thisDayofData$dow), 7), # data day is the day for which we actually have data
+                              modeledDay = colnames(lowVarSignal), # there are 6 modeled days for each data day
+                              dailySum = as.numeric(lowVarSignal[1,])*modeledWeek) # this is the modeled sum for the modeled day
+    modeledData$dataDay <- as.character(modeledData$dataDay)
+    modeledData$modeledDay <- as.character(modeledData$modeledDay)
+    modeledData <- modeledData[! modeledData$dataDay == modeledData$modeledDay,] # remove the days for which we have actual data from modeledData
+    modeledData_all <- rbind(modeledData_all, modeledData)
+    
+    rm(dailySum)
+  }
+  
+  modeledData_all <- modeledData_all %>% # means of modeled day data
+    group_by(modeledDay) %>%
+    dplyr::summarise(modeledMeans = mean(dailySum))
+  modeledData_all <- modeledData_all[! modeledData_all$modeledDay %in% actualData$dow,]
+  colnames(modeledData_all) <- c('dow', 'dailySum')
+  
+  weeklySum_modeled <- rbind(modeledData_all, actualData)
+  weeklySum_modeled <- sum(weeklySum_modeled$dailySum)
+  
+  weeklySum <- rbind(weeklySum, data.frame(sensor = incSensors[i], 
+                                           lat = unique(peds$lat),
+                                           long = unique(peds$long),
+                                           weeklySum = weeklySum_modeled))
+}
+
+weeklySum$weeklySum <- round(weeklySum$weeklySum)
+
+# write.csv(weeklySum, file = './modeledWeekly.csv', row.names = F)
+
