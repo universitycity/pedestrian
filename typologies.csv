@@ -1,0 +1,51 @@
+sensor,class,notes
+on30th_Market_Chestnut_23June17_5July17_15min,cbd,
+on33rd_Market_Lancaster_1Nov17_9Nov17_15min,cbd,
+on38th_Market_Ludlow_8Nov17_17Nov17_15min,cbd,
+on40th_Ludlow_Chestnut_23June17_6July17_15min,cbd,
+on40th_Market_Ludlow_17Nov18_15Dec18_15min,nothing,"higher Sat, low Sun, range of 0.029…maybe impacted by 40th St Station"
+on40th_Sansom_Walnut_6June17_14June17_15min,cbd,low Sat/Sun
+on41st_Chestnut_Ludlow_8May19_10May19_15min,inc,apply low variation
+on41st_Market_Powelton_24Aug17_1Sept17_15min,cbd,low Sat/Sun
+on43rd_Delancey_Pine_1Nov17_8Nov17_15min,low variation,"low Tuesday, low Sat/Sun, range of 0.067"
+on44th_Pine_OsageNorth_18Apr17_23May17_15min,low variation,range of 0.01
+on44th_Pine_OsageSouth_18Apr17_26Apr17_15min,REMOVE,higher Sat/Sun
+on45th_Regent_Kingsessing_23Oct17_31Oct17_15min,park,"high Sat, low Sun"
+on45th_Spruce_Pine_14June17_23June17_15min,low variation,range of 0.057
+on46th_Market_Ludlow_18July17_26July17_15min,cbd,low Sat/Sun
+onBaltimore_45th_Melville_24Aug17_1Sept17_15min,corridor,high Sat/Sun
+onChester_43rd_45th_14June17_22June17_15min,park,high Sun
+onChestnut_33rd_34th_20Apr17_16May19_15min,cbd,low Sat/Sun
+onCivicCenter_Convention_EService_26Apr17_23May17_15min,cbd,low Sat/Sun
+onCivicCenter_Osler_WService_6July17_18July17_15min,cbd,low Sat/Sun
+onCurie_Guardian_Osler_1Sept17_12Sept17_15min,cbd,"low Sat/Sun, lowish Mon"
+onFarragut_Springfield_Chester_17May19_22May19_15min,inc,apply low variation
+onFarragut_Walnut_Locust_10May19_14May19_15min,inc,apply low variation
+onFilbert_39th_Sloan_26July17_16Aug17_15min,cbd,low Sat/Sun
+onFilbert_40th_Wiota_8Dec17_13July18_15min,cbd,low Sat/Sun
+onHanson_Locust_Walnut_10May19_14May19_15min,inc,apply low variation
+onHazel_46th_47th_19July17_27July17_15min,low variation,range of 0.088
+onIrving_41st_Preston_8May19_10May19_15min,inc,apply low variation
+onMarket_34th_35th_4Apr19_20May19_15min,cbd,low Sat/Sun
+onMarket_36th_37th_1June17_19Oct18_15min,cbd,low Sat/Sun
+onOsage_49th_50th_14May19_17May19_15min,inc,apply low variation
+onRace_Natrona_33rd_6July17_18July17_15min,low variation,range of 0.062
+onRegent_47th_deadEnd_17May19_22May19_15min,inc,apply low variation
+onSansom_34th_36th_27July17_16Aug17_15min,nothing,"low Sat/Sun, high Thurs/Fri"
+onSchuylkill_Market_Chestnut_12Sept17_20Sept17_15min,cbd,low Sat/Sun
+onSchuylkill_Market_ChestnutSouth_11Oct17_20Oct17_15min,cbd,low Sat/Sun
+onSpruce_39th_40th_1Sept17_12Sept17_15min,cbd,low Sat/Sun
+onStBernard_Spruce_Pine_14May19_17May19_15min,inc,apply low variation
+onUniversity_Curie_Guardian_12Sept17_22Sept17_15min,cbd,low Sat/Sun
+onUniversityAveBridge_6June17_14June17_15min,cbd,low Sat/Sun
+onWalnut_36th_37th_19Apr17_25May17_15min,cbd,"low Sat/Sun, lowish Tues/Wed"
+onWalnut_39th_40th_24Sept18_30Dec18_15min,nothing,range = 0.036
+onWillows_Baltimore_50th_9Nov17_21Nov17_15min,low variation,range = 0.046
+onWoodland_41st_42nd_16Aug17_24Aug17_15min,nothing,low Fri/Sat/Sun
+onWoodlandTer_Baltimore_Chester_16Aug17_23Aug17_15min,low variation,range = 0.073
+on47th_Baltimore_Cedar_22May19_3Jun19_15min,low variation,range = 0.065
+onSpringfield_45th_46th_22May19_3Jun19_15min,low variation,range = 0.05
+on48th_Springfield_Trinity_3Jun19_5Jun19_15min,inc,apply low variation
+onLancaster_36th_37th_13Jun19_18Jun19_15min,inc,apply low variation
+onSansom_39th_40th_18Jun19_24Jun19_15min,inc,apply low variation
+onSansom_38th_39th_20Jun19_23Jun19_15min,inc,apply low variation
