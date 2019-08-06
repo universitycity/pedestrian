@@ -1,0 +1,569 @@
+######################################################################################
+#
+# Modeling pedestrian volumes on all streets of University City, Philadelphia
+#
+# Tyler Tran
+# May 2019
+#
+# Inputs: ucd.shp (shapefile of University City boundaries),
+# greaterUCD.shp (shapefile of "greater University City"),
+# greaterUC_lodes.csv (LODES employment data for greater University City)
+#
+# Outputs: modeledWeekly.csv (csv of estimated weekly sums for each sensor)
+#
+######################################################################################
+
+
+rm(list = ls())
+
+require(dplyr); require(ggplot2); require(tidycensus); require(sf); require(leaflet); library(maptools); library(ggfortify)
+library(rsq); library(viridis); library(robustbase); library(lctools); library(caret); library(ModelMetrics)
+
+# setwd('')
+
+census_api_key("") # insert your API key here from Census Bureau
+
+
+# Get population estimates at block level from 2010 decennial census
+# ACS would more up-to-date (although probably less accurate), but it's more important that we have data at block level than updated data
+# And spatial patterns in population have not changed much in University City in the past 7 years (as of writing, 2017 is most recent ACS data)
+popBlocks <- get_decennial(geography = "block",
+                           variables = 'P001001', geometry = T,
+                           state = "PA", county = 'Philadelphia', year=2010)
+
+ucd <- read_sf('./UCD Boundary_realigned.shp') # shapefile of study area
+greaterUC <- st_read('./greaterUCD.shp')
+
+# transform population object to have same projection as ucd boundary
+popBlocks <- st_transform(popBlocks, st_crs(ucd))
+popBlocks <- popBlocks[ucd,] # only focus on population data from University City
+
+greaterUC_lodes <- read.csv('./greaterUC_lodes.csv') # LODES data (2015) at block level for UCD and a few block buffer around district
+greaterUC_lodes$GEOID <- as.character(greaterUC_lodes$GEOID)
+
+liveWork <- left_join(popBlocks, greaterUC_lodes, by = 'GEOID') # liveWork is an sf object with number of jobs and number of residents. Also get density below. NA means 0 residents or 0 jobs
+colnames(liveWork)[colnames(liveWork) == 'value'] <- 'nRes'
+liveWork <- liveWork[greaterUC,] # limit the data geographically a little
+liveWork$resDens <- liveWork$nRes/st_area(liveWork) # calculate pop density
+liveWork$jobDens <- liveWork$nJobs/st_area(liveWork) # calculate job density
+
+# Need to split up Penn's 12160 job number up a little more evenly geographically across campus
+pennEmployQuadrants <- c('421010369001012', '421010369001018', '421010088011003',
+                         '421010088011004', '421010088011002', '421010088011005',
+                         '421010088023003', '421010369003022')
+pennEmployQuadrants2x <- '421010369001011'
+pennEmployQuadrantsHalf <- c('421010088023004', '421010088023005')
+
+liveWork$nJobs[liveWork$GEOID %in% pennEmployQuadrants] <- 1216
+liveWork$nJobs[liveWork$GEOID %in% pennEmployQuadrants2x] <- 2432
+liveWork$nJobs[liveWork$GEOID %in% pennEmployQuadrantsHalf] <- 608
+
+# polygon shapefile of building footprints in all of Philadelphia
+buildings <- st_read('./ucBuildingFootprints.shp')
+buildings <- st_transform(buildings, st_crs(ucd))
+buildings$MAX_HGT[buildings$MAX_HGT == 0] <- NA # if some max heights are falsely set to 0, make them NA
+
+# calculate mean heights of buildings in each block
+liveWork$buildingHght <- NA
+for (i in 1:nrow(liveWork)){
+  thisBlock <- liveWork[i,]
+  theseBuildings <- buildings[thisBlock,]
+  liveWork$buildingHght[i] <- mean(theseBuildings$MAX_HGT, na.rm = T) # a lot of the buildings in eastern UC have 0 for approx_hgt so use max instead
+}
+
+
+# Load shapefile of space syntax metrics for each street segment (calculated in script 02)
+localInt <- read_sf('./ucdSegments_ssa.shp') # for whole city
+localInt <- st_transform(localInt, st_crs(ucd))
+
+# because all the data before was at the census block level, we have to make it...
+# ...more applicable to the street segments
+
+# Below are TWO different methods:
+# 1. Use the census blocks that each street segment intersects (for many "normal" blocks, this will be 6 blocks, but we are mostly interested in the two adjacent blocks, not the end ones)
+# 2. Choose a point on the line, make a small buffer around that point (2 ft radius), and it will *probably* just get the two adjacent blocks (USE THIS METHOD)
+# dat2join <- data.frame(streetID = NULL, nRes = NULL, nJobs = NULL, resDens = NULL, jobDens = NULL, bldgHght = NULL)
+# for (i in 1:nrow(localInt)){
+#   thisStreet <- localInt[i,]
+#   touches <- st_intersects(thisStreet, liveWork) # figure out which blocks each street intersects
+#   touches <- touches[[1]] # these are indices of the blocks that a certain street intersects
+#   nTouches <- length(touches)
+#   touches <- liveWork[touches,]
+#   dat2join <- rbind(dat2join, data.frame(streetID = thisStreet$streetID,
+#     nRes = sum(touches$nRes, na.rm = T)/nTouches,
+#    nJobs = sum(touches$nJobs, na.rm = T)/nTouches,
+#  resDens = sum(touches$nRes, na.rm = T)/as.numeric(st_area(touches)), # this is actual density instead of a mean of densities from multiple blocks
+#  jobDens = sum(touches$nJobs, na.rm = T)/as.numeric(st_area(touches)),
+# bldgHght = mean(touches$buildingHght, na.rm = T)))
+# }
+
+
+midpoints <- st_centroid(localInt)
+midptBuffs <- st_buffer(midpoints, dist = 2) # 2 ft buffers around the midpoints. use 10ft for centroid
+
+
+# Manually (in ArcGIS) split up big hospital block. Gave 95% of 13013 jobs to eastern portion and 5% to western portion bc it was so big
+# and not geographically dispersed like the jobs actually are
+liveWork <- st_read('./liveWork_hosp.shp')
+
+dat2join <- data.frame(streetID = NULL, nRes = NULL, nJobs = NULL, resDens = NULL, jobDens = NULL, bldgHght = NULL)
+for (j in 1:nrow(localInt)){
+  thisStreet <- localInt[j,] # to use buffers around street "mid"points
+  thisStreet_pts <- st_cast(thisStreet, "POINT")
+  
+  thisStreet_cent <- st_buffer(thisStreet_pts, dist = 5)
+  touches <- st_intersects(thisStreet_cent, liveWork)
+  touches <- c(touches[[1]], touches[[2]]) # these are indices of the blocks that a certain point buffer intersects
+  nTouches <- length(touches)
+  touches <- liveWork[touches,]
+  touchBuilding <- buildings[touches,]
+  if (nrow(touches) > 0){ # some of the street segments might actually be outside the district (but intersecting with a boundary)
+    dat2join <- rbind(dat2join, data.frame(streetID = thisStreet$streetID,
+                                           nRes = sum(touches$nRes, na.rm = T),
+                                           nJobs = sum(touches$nJobs, na.rm = T),
+                                           resDens = sum(touches$nRes, na.rm = T)/sum(as.numeric(st_area(touches))), # this is actual density instead of a mean of densities from multiple blocks
+                                           jobDens = sum(touches$nJobs, na.rm = T)/sum(as.numeric(st_area(touches))),
+                                           bldgHght = mean(touchBuilding$MAX_HGT, na.rm = T)))
+  } else{ # just put NA for the street segments outside UC boundaries
+    dat2join <- rbind(dat2join, data.frame(streetID = thisStreet$streetID,
+                                           nRes = NA,
+                                           nJobs = NA,
+                                           resDens = NA,
+                                           jobDens = NA,
+                                           bldgHght = NA))
+  }
+}
+
+dat2join$nJobs[dat2join$streetID==11752] <- 3494.65 # bc VA Hospital wasn't included in jobs data
+
+
+
+transit <- read.csv('./transitHubs.csv')
+transit <- st_as_sf(transit, coords = c('long', 'lat'))
+transit <- st_set_crs(transit, 4326)
+transit <- st_transform(transit, st_crs(ucd))
+transit <- transit[ucd,]
+
+transitData <- data.frame(streetID = NULL, transitDist = NULL)
+for (m in 1:nrow(midptBuffs)){
+  thisStreet <- midptBuffs[m,]
+  transitDist <- st_distance(thisStreet, transit)
+  transitDist <- min(transitDist, na.rm = T)[[1]]
+  transitData <- rbind(transitData, data.frame(streetID = thisStreet$streetID,
+                                               transitDist = transitDist))
+}
+
+####
+# transit ridership
+bus <- read.csv('./bus_spring2018.csv')
+bus$Weekday_Total[is.na(bus$Weekday_Total)] <- 0
+bus$Saturday_Total[is.na(bus$Saturday_Total)] <- 0
+bus$Sunday_Total[is.na(bus$Sunday_Total)] <- 0
+bus <- data.frame(weeklyRiders = (bus$Weekday_Total + bus$Saturday_Total + bus$Sunday_Total), lat = bus$Latitude, long = bus$Longitude, type = 'bus')
+trolley <- read.csv('./trolley_spring2018.csv')
+trolley$Weekday_Total[is.na(trolley$Weekday_Total)] <- 0
+trolley$Saturday_Total[is.na(trolley$Saturday_Total)] <- 0
+trolley$Sunday_Total[is.na(trolley$Sunday_Total)] <- 0
+trolley <- data.frame(weeklyRiders = (trolley$Weekday_Total + trolley$Saturday_Total + trolley$Sunday_Total), lat = trolley$Latitude, long = trolley$Longitude, type = 'trolley')
+mfl <- read.csv('./mfl_spring2018.csv')
+mfl$Average_Weekday_Ridership[is.na(mfl$Average_Weekday_Ridership)] <- 0
+mfl$Average_Saturday_Ridership[is.na(mfl$Average_Saturday_Ridership)] <- 0
+mfl$Average_Sunday_Ridership[is.na(mfl$Average_Sunday_Ridership)] <- 0
+mfl <- data.frame(weeklyRiders = (mfl$Average_Weekday_Ridership + mfl$Average_Saturday_Ridership + mfl$Average_Sunday_Ridership), lat = mfl$Latitude, long = mfl$Longitude, type = 'mfl')
+bsl <- read.csv('./bsl_spring2018.csv')
+bsl$Average_Weekday_Ridership[is.na(bsl$Average_Weekday_Ridership)] <- 0
+bsl$Average_Saturday_Ridership[is.na(bsl$Average_Saturday_Ridership)] <- 0
+bsl$Average_Sunday_Ridership[is.na(bsl$Average_Sunday_Ridership)] <- 0
+bsl <- data.frame(weeklyRiders = (bsl$Average_Weekday_Ridership + bsl$Average_Saturday_Ridership + bsl$Average_Sunday_Ridership), lat = bsl$Latitude, long = bsl$Longitude, type = 'bsl')
+regRail <- read.csv('./regionalRail_spring2018.csv')
+regRail$Weekday_Total_Boards[is.na(regRail$Weekday_Total_Boards)] <- 0
+regRail$Weekday_Total_Leaves[is.na(regRail$Weekday_Total_Leaves)] <- 0
+regRail$Saturday_Total_Boards[is.na(regRail$Saturday_Total_Boards)] <- 0
+regRail$Saturday_Total_Leaves[is.na(regRail$Saturday_Total_Leaves)] <- 0
+regRail$Sunday_Total_Boards[is.na(regRail$Sunday_Total_Boards)] <- 0
+regRail$Sunday_Total_Leaves[is.na(regRail$Sunday_Total_Leaves)] <- 0
+regRail <- data.frame(weeklyRiders = (regRail$Weekday_Total_Boards + regRail$Weekday_Total_Leaves 
+                                      + regRail$Saturday_Total_Boards + regRail$Saturday_Total_Leaves 
+                                      + regRail$Sunday_Total_Boards + regRail$Sunday_Total_Leaves), 
+                      lat = regRail$Latitude, long = regRail$Longitude, type = 'regRail')
+
+
+riders <- do.call("rbind", list(bus, trolley, mfl, bsl, regRail))
+
+riders <- riders[! is.na(riders$long),]
+riders <- st_as_sf(riders, coords = c('long', 'lat'))
+riders <- st_set_crs(riders, 4326)
+riders <- st_transform(riders, st_crs(ucd))
+riders <- riders[ucd,]
+
+riderBuffs400m <- st_buffer(localInt, dist = 1312) # 400m = 1312 feet... Seth used 250 ft. Literature support
+
+riderData400m <- data.frame(streetID = NULL, weeklyRiders400 = NULL)
+for (z in 1:nrow(riderBuffs400m)){
+  thisStreet <- riderBuffs400m[z,]
+  theseRiders <- riders[thisStreet,]
+  nRiders <- sum(theseRiders$weeklyRiders, na.rm = T)
+  riderData400m <- rbind(riderData400m, data.frame(streetID = thisStreet$streetID,
+                                                   weeklyRiders400 = nRiders))
+}
+
+riderBuffs250m <- st_buffer(localInt, dist = 820) # 250m = 820 feet... Seth used 250 ft. Literature support
+
+riderData250m <- data.frame(streetID = NULL, weeklyRiders250 = NULL)
+for (z in 1:nrow(riderBuffs250m)){
+  thisStreet <- riderBuffs250m[z,]
+  theseRiders <- riders[thisStreet,]
+  nRiders <- sum(theseRiders$weeklyRiders, na.rm = T)
+  riderData250m <- rbind(riderData250m, data.frame(streetID = thisStreet$streetID,
+                                                   weeklyRiders250 = nRiders))
+}
+
+
+riderBuffs500m <- st_buffer(localInt, dist = 1640) # 500m = 1640 feet... Seth used 250 ft. Literature support
+
+riderData500m <- data.frame(streetID = NULL, weeklyRiders500 = NULL)
+for (z in 1:nrow(riderBuffs500m)){
+  thisStreet <- riderBuffs500m[z,]
+  theseRiders <- riders[thisStreet,]
+  nRiders <- sum(theseRiders$weeklyRiders, na.rm = T)
+  riderData500m <- rbind(riderData500m, data.frame(streetID = thisStreet$streetID,
+                                                   weeklyRiders500 = nRiders))
+}
+
+
+
+surfaceRiders <- do.call("rbind", list(bus, trolley))
+
+surfaceRiders <- surfaceRiders[! is.na(surfaceRiders$long),]
+surfaceRiders <- st_as_sf(surfaceRiders, coords = c('long', 'lat'))
+surfaceRiders <- st_set_crs(surfaceRiders, 4326)
+surfaceRiders <- st_transform(surfaceRiders, st_crs(ucd))
+surfaceRiders <- surfaceRiders[ucd,]
+
+riderBuffs <- st_buffer(localInt, dist = 1312) 
+
+surfaceData <- data.frame(streetID = NULL, weekdaysurfaceRiders = NULL)
+for (z in 1:nrow(riderBuffs)){
+  thisStreet <- riderBuffs[z,]
+  thesesurfaceRiders <- surfaceRiders[thisStreet,]
+  nsurfaceRiders <- sum(thesesurfaceRiders$weekdayRiders, na.rm = T)
+  surfaceData <- rbind(surfaceData, data.frame(streetID = thisStreet$streetID,
+                                               weekdaysurfaceRiders = nsurfaceRiders))
+}
+
+
+separatedRiders <- do.call("rbind", list(mfl, bsl, regRail))
+
+separatedRiders <- separatedRiders[! is.na(separatedRiders$long),]
+separatedRiders <- st_as_sf(separatedRiders, coords = c('long', 'lat'))
+separatedRiders <- st_set_crs(separatedRiders, 4326)
+separatedRiders <- st_transform(separatedRiders, st_crs(ucd))
+separatedRiders <- separatedRiders[ucd,]
+
+riderBuffs <- st_buffer(localInt, dist = 1312)
+
+separatedData <- data.frame(streetID = NULL, weekdayseparatedRiders = NULL)
+for (z in 1:nrow(riderBuffs)){
+  thisStreet <- riderBuffs[z,]
+  theseseparatedRiders <- separatedRiders[thisStreet,]
+  nseparatedRiders <- sum(theseseparatedRiders$weekdayRiders, na.rm = T)
+  separatedData <- rbind(separatedData, data.frame(streetID = thisStreet$streetID,
+                                                   weekdayseparatedRiders = nseparatedRiders))
+}
+
+
+
+
+
+
+####
+
+# Contact Tyler Tran for these data
+retail <- read_sf('./Retail.shp')
+foodBev <- read_sf('./FandB.shp')
+
+retailBuffs <- st_buffer(localInt, dist = 60)
+
+
+retailData <- data.frame(streetID = NULL, retailSF = NULL, fbSF = NULL, totalSF = NULL)
+for (n in 1:nrow(retailBuffs)){
+  thisStreet <- retailBuffs[n,]
+  theseRetail <- retail[thisStreet,]
+  theseFB <- foodBev[thisStreet,]
+  retailSF <- sum(theseRetail$GLA_for_su, na.rm = T)
+  fbSF <- sum(theseFB$GLA_for_su, na.rm = T)
+  retailData <- rbind(retailData, data.frame(streetID = thisStreet$streetID,
+                                             retailSF = retailSF,
+                                             fbSF = fbSF,
+                                             totalSF = retailSF + fbSF))
+}
+
+
+# below, load csv of estimated weekly ped sums for sensors...output of script 01
+sensorData <- read.csv('') # INSERT PATH
+sensorData <- st_as_sf(sensorData, coords = c('long', 'lat'))
+sensorData <- st_set_crs(sensorData, 4326)
+sensorData <- st_transform(sensorData, st_crs(ucd))
+
+sensorData$streetID <- NA
+# snap ped sensors to the nearest street
+for (i in 1:nrow(sensorData)){
+  dists2streets <- st_distance(sensorData[i,], localInt)
+  sensorData$streetID[i] <- localInt$streetID[which(dists2streets == min(dists2streets))]
+}
+
+
+data4model <- sensorData %>%
+  group_by(streetID) %>%
+  dplyr::summarise(meanPed = mean(weeklySum, na.rm = T))
+data4model <- data.frame(streetID = data4model$streetID, meanPed = data4model$meanPed)
+
+
+modeling <- left_join(localInt, data4model, by = 'streetID')
+modeling <- modeling[! is.na(modeling$meanPed),]
+modeling <- left_join(modeling, dat2join, by = 'streetID')
+modeling <- left_join(modeling, transitData, by = 'streetID')
+modeling <- left_join(modeling, retailData, by = 'streetID')
+modeling <- left_join(modeling, riderData250m, by = 'streetID')
+modeling <- left_join(modeling, riderData400m, by = 'streetID')
+modeling <- left_join(modeling, riderData500m, by = 'streetID')
+modeling <- left_join(modeling, surfaceData, by = 'streetID')
+modeling <- left_join(modeling, separatedData, by = 'streetID')
+
+# Refine "type" a little bit...so it's just binary variable for high ped/comm corridors/civic and ceremonial and walkable comm. corrs.
+highPedTypes <- c('High Pedestrian Volume', 'Civic/Ceremonial', 'Walkable Commercial Corridors')
+modeling$highPedType <- 0
+modeling$highPedType[modeling$type %in% highPedTypes] <- 1
+
+# manually fix 2 building height entries
+modeling$bldgHght[modeling$streetID==12547] <- 32.1
+modeling$bldgHght[modeling$streetID==31903] <- 35.6
+
+modelingDF <- as.data.frame(modeling) # so that it's easy to exclude "geometry" from PCA
+
+
+pedPCA <- prcomp(modelingDF[,c(7,12,13,17,18,19,22,27)], center = T, scale. = T)
+summary(pedPCA)
+
+
+# pca biplot
+autoplot(pedPCA, data = modelingDF, size = 'meanPed', loadings = T,
+         loadings.label = T) +
+  theme(panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA),
+        panel.background = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank())
+
+
+# Now let's use the model to predict ped numbers for all the other streets in the district
+streets2model <- localInt[! localInt$streetID %in% data4model$streetID,] # the other streets in the district (the ones without ped sensors)
+streets2model$meanPed <- NA
+streets2model <- left_join(streets2model, dat2join, by = 'streetID')
+streets2model <- left_join(streets2model, transitData, by = 'streetID')
+streets2model <- left_join(streets2model, retailData, by = 'streetID')
+streets2model <- left_join(streets2model, riderData250m, by = 'streetID')
+streets2model <- left_join(streets2model, riderData400m, by = 'streetID')
+streets2model <- left_join(streets2model, riderData500m, by = 'streetID')
+streets2model <- left_join(streets2model, surfaceData, by = 'streetID')
+streets2model <- left_join(streets2model, separatedData, by = 'streetID')
+
+streets2model$highPedType <- 0
+streets2model$highPedType[streets2model$type %in% highPedTypes] <- 1
+
+
+# this is final model used in Tran and Budick (submitted to Transportation Research Record)
+finalModel <- glm(round(meanPed) ~ LocalInteg + nJobs  
+           + weeklyRiders400, data = modeling, family = quasipoisson)
+summary(finalModel)
+
+# same model as above, but don't round ped estimates to integers so that can calculate pseudo-R2 using rsq package
+finalModelNoRound <- glm(meanPed ~ LocalInteg + nJobs + highPedType  
+                  + weeklyRiders400, data = modeling, family = quasipoisson)
+rsq(finalModelNoRound)
+
+
+modeling$resid <- finalModel$residuals
+
+# plot collected count data
+ggplot() +
+  geom_sf(data = modeling, lwd = 1.2, aes(color = resid)) +
+  scale_color_viridis() +
+  theme(panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.line = element_blank(),
+        axis.ticks = element_blank())
+
+
+
+# Now let's use the model to predict ped numbers for all the other streets in the district
+modeledStreets <- predict.glm(object = finalModel, newdata = streets2model, type = 'response')
+streets2model$meanPed <- modeledStreets
+
+pedestriansModeled <- rbind(streets2model, modeling[,-28]) # remove resid column
+
+
+#### FOR TABLE 1 in manuscript
+
+tab1cols <- c('LocalInteg', 'nRes', 'nJobs', 'bldgHght', 'transitDist', 'retailSF', 'fbSF', 'weeklyRiders250',
+              'weeklyRiders400', 'weeklyRiders500', 'highPedType')
+
+tab1modeling <- modeling[,colnames(modeling) %in% tab1cols]
+tab1otherSts <- streets2model[,colnames(streets2model) %in% tab1cols]
+tab1allSts <- rbind(tab1modeling, tab1otherSts)
+
+tab1allSts$transitDist <- as.numeric(tab1allSts$transitDist)
+tab1allSts <- as.data.frame(tab1allSts)
+tab1allSts <- tab1allSts[,! colnames(tab1allSts) == 'geometry']
+
+tab1modeling$transitDist <- as.numeric(tab1modeling$transitDist)
+tab1modeling <- as.data.frame(tab1modeling)
+tab1modeling <- tab1modeling[,! colnames(tab1modeling) == 'geometry']
+
+
+# All streets
+colMeans(tab1allSts)
+colMeans(tab1modeling)
+colMedians(as.matrix(tab1allSts))
+colMedians(as.matrix(tab1modeling))
+
+min(tab1allSts$LocalInteg)
+min(tab1allSts$nRes)
+min(tab1allSts$nJobs)
+min(tab1allSts$bldgHght)
+min(tab1allSts$transitDist)
+min(tab1allSts$retailSF)
+min(tab1allSts$fbSF)
+min(tab1allSts$weeklyRiders250)
+min(tab1allSts$weeklyRiders400)
+min(tab1allSts$weeklyRiders500)
+
+max(tab1allSts$LocalInteg)
+max(tab1allSts$nRes)
+max(tab1allSts$nJobs)
+max(tab1allSts$bldgHght)
+max(tab1allSts$transitDist)
+max(tab1allSts$retailSF)
+max(tab1allSts$fbSF)
+max(tab1allSts$weeklyRiders250)
+max(tab1allSts$weeklyRiders400)
+max(tab1allSts$weeklyRiders500)
+
+sd(tab1allSts$LocalInteg)
+sd(tab1allSts$nRes)
+sd(tab1allSts$nJobs)
+sd(tab1allSts$bldgHght)
+sd(tab1allSts$transitDist)
+sd(tab1allSts$retailSF)
+sd(tab1allSts$fbSF)
+sd(tab1allSts$weeklyRiders250)
+sd(tab1allSts$weeklyRiders400)
+sd(tab1allSts$weeklyRiders500)
+
+
+# Study streets
+colMeans(tab1modeling)
+colMedians(as.matrix(tab1modeling))
+
+min(tab1modeling$LocalInteg)
+min(tab1modeling$nRes)
+min(tab1modeling$nJobs)
+min(tab1modeling$bldgHght)
+min(tab1modeling$transitDist)
+min(tab1modeling$retailSF)
+min(tab1modeling$fbSF)
+min(tab1modeling$weeklyRiders250)
+min(tab1modeling$weeklyRiders400)
+min(tab1modeling$weeklyRiders500)
+
+max(tab1modeling$LocalInteg)
+max(tab1modeling$nRes)
+max(tab1modeling$nJobs)
+max(tab1modeling$bldgHght)
+max(tab1modeling$transitDist)
+max(tab1modeling$retailSF)
+max(tab1modeling$fbSF)
+max(tab1modeling$weeklyRiders250)
+max(tab1modeling$weeklyRiders400)
+max(tab1modeling$weeklyRiders500)
+
+sd(tab1modeling$LocalInteg)
+sd(tab1modeling$nRes)
+sd(tab1modeling$nJobs)
+sd(tab1modeling$bldgHght)
+sd(tab1modeling$transitDist)
+sd(tab1modeling$retailSF)
+sd(tab1modeling$fbSF)
+sd(tab1modeling$weeklyRiders250)
+sd(tab1modeling$weeklyRiders400)
+sd(tab1modeling$weeklyRiders500)
+
+
+
+
+
+# https://cran.r-project.org/web/packages/lctools/vignettes/SpatialAutocorrelation.pdf
+# CHECK MORANS I FOR MODEL RESIDUALS
+checkResids <- sensorData[sensorData$streetID %in% modeling$streetID,]
+checkResids <- checkResids[! duplicated(checkResids$streetID),]
+pedCoords <- st_coordinates(checkResids)
+bw <- 6
+mI <- moransI(pedCoords, bw, foo$residuals)
+moran.table <- matrix(data=NA,nrow=1,ncol=6)
+col.names <- c("Moran's I", "Expected I", "Z resampling", "P-value resampling",
+               "Z randomization", "P-value randomization")
+colnames(moran.table) <- col.names
+moran.table[1,1] <- mI$Morans.I
+moran.table[1,2] <- mI$Expected.I
+moran.table[1,3] <- mI$z.resampling
+moran.table[1,4] <- mI$p.value.resampling
+moran.table[1,5] <- mI$z.randomization
+moran.table[1,6] <- mI$p.value.randomization
+moran.table
+
+
+# CHECK MORANS I FOR DATA
+checkResids <- sensorData[sensorData$streetID %in% modeling$streetID,]
+checkResids <- checkResids[! duplicated(checkResids$streetID),]
+pedCoords <- st_coordinates(sensorData)
+bw <- 6
+mI <- moransI(pedCoords, bw, sensorData$weeklySum)
+moran.table <- matrix(data=NA,nrow=1,ncol=6)
+col.names <- c("Moran's I", "Expected I", "Z resampling", "P-value resampling",
+               "Z randomization", "P-value randomization")
+colnames(moran.table) <- col.names
+moran.table[1,1] <- mI$Morans.I
+moran.table[1,2] <- mI$Expected.I
+moran.table[1,3] <- mI$z.resampling
+moran.table[1,4] <- mI$p.value.resampling
+moran.table[1,5] <- mI$z.randomization
+moran.table[1,6] <- mI$p.value.randomization
+moran.table
+
+
+# spatial autocorr: https://rspatial.org/analysis/7-spregression.html
+
+
+# Cross validation
+# Leave-one-out cross validation (LOOCV) or n-fold cross validation
+
+train_control <- trainControl(method = 'LOOCV')
+modelCV <- train(meanPed ~ LocalInteg + nJobs + highPedType 
+                 + weeklyRiders400, 
+                 data = modeling, trControl = train_control, method = 'glm', family = quasipoisson(link = 'log'))
+modelCV
+summary(modelCV)
+modelCV$pred
+
+
+
+
+# model performance metrics
+rmse(finalModel$fitted.values, modeling$meanPed) # RMSE
+mean(abs(finalModel$fitted.values - modeling$meanPed)) # Mean absolute error (MAE)
+sd(abs(finalModel$fitted.values - modeling$meanPed)) # Mean absolute error (MAE)
+
+predict.glm(finalModel, type = 'response')
+
